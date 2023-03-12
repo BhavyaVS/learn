@@ -1,0 +1,86 @@
+import org.apache.spark._
+import org.apache.spark.sql.SQLContext
+import org.apache.log4j._
+import scala.math.min
+import scala.math.max
+import org.apache.spark.sql.functions
+
+val sqlContext = new SQLContext(sc)
+//read data from CSV file
+val df_ReadCSV=sqlContext.read.format("csv").option("header",true).option("inferSchema", "true").option("escapeQuotes", "true").load("file:///E:/Bhavya/assignment/Reviews.csv")
+
+
+//**********CLEANING DATA*************
+
+
+//add another column-> Helpfulness
+val df_HelpfulnessCol=df_ReadCSV.withColumn("ReviewHelpfulnessScore",$"HelpfulnessNumerator"/$"HelpfulnessDenominator")
+
+//HelpfulnessNumerator>HelpfulnessDenominator is wrong. so filter it out
+val df_filter=df_HelpfulnessCol.filter("ReviewHelpfulnessScore <= 1")
+
+//cast typing string to Int
+val df_cast= df_filter.withColumn("Score",col("Score").cast("int"))
+//df3.select($"Score").distinct.count()
+
+//convert unix timestamp to yyyy format
+val df_timestamp= df_cast.withColumn("Year",from_unixtime(col("Time"),"yyyy").as("Year"))
+
+//concatenate review subject and text to form a single column-- for word processing
+val df_ReviewCol = df_timestamp.withColumn("Review",concat(col("Summary"),lit(' '),col("Text")))
+
+//remove special characters(symbols and numbers) from review
+val clean=functions.udf((s:String) =>{
+s.replaceAll("n\'t", " not")
+.replaceAll("\'re", " are")
+.replaceAll("\'s", " is")
+.replaceAll("\'d", " would")
+.replaceAll("\'ll", " will")
+.replaceAll("\'t", " not")
+.replaceAll("\'ve", " have")
+.replaceAll("\'m", " am")
+.replaceAll("[.!,`~@#$%&*^()+=<>?;|:\'\"/{}1-9]"," ")
+.replaceAll("[-]"," ")
+}
+)
+val cleanDF=df_ReviewCol.withColumn("Review", clean($"Review"))
+
+//convert all words in review column to lowercase
+val finalDF= cleanDF.withColumn("updatedReviews",lower($"Review"))
+//finalDF.printSchema
+//finalDF.select("Review").show()
+
+//create temporary table to praccess the dataframe
+val review=finalDF.createOrReplaceTempView("reviews")
+//Review helpfulness count on a product over the years- to check if the product is still actively reviewed over the years
+
+//filter out rows with 0 helpfulness numerator.
+val df_helpfulReviews=finalDF.filter("ReviewHelpfulnessScore is NOT NULL AND ReviewHelpfulnessScore != 0.0")
+val review_metric1=df_helpfulReviews.createOrReplaceTempView("review_metric1")
+
+//group by product ID, then by year and add ReviewHelpfulnessScore in each group
+val df_metric1=spark.sql("select ProductId, Year, sum(ReviewHelpfulnessScore) AS Review_Helpfulness_SumPerYear from review_metric1 GROUP BY ProductId, Year ORDER BY ProductId, Year")
+df_metric1.coalesce(1).write.option("header", "true").csv("E:/Bhavya/assignment/output/metric1")
+//Average ratings for a product over the years- to check product performance over the years
+
+//group by product ID, then by year and average ratings in each group
+val df_metric2=spark.sql("select ProductId, Year, avg(Score) AS Average_Score from reviews GROUP BY ProductId, Year ORDER BY ProductId, Year")
+df_metric2.coalesce(1).write.option("header", "true").csv("E:/Bhavya/assignment/output/metric2")
+//Top rated products on front page- for product promotion
+
+//group by product ID, choose rows with 4/5 ratings and sum of ratings in each group
+val df_metric4=spark.sql("select ProductId, count(Score) AS NumberOfPositiveRatings from reviews where Score=4 OR Score=5 GROUP BY ProductId, Score ORDER BY NumberOfPositiveRatings DESC")
+df_metric4.coalesce(1).write.option("header", "true").csv("E:/Bhavya/assignment/output/metric4")
+//User with more upvotes and high helpfulness score(>75%) can be termed verified/"influential" user on Amazon Website
+
+val df_metric6_p1 = spark.sql("select UserId, ProfileName, count(UserId) as User_Review_Count, ((sum(ReviewHelpfulnessScore)/count(UserId))*100) as User_Review_Helpfulness from reviews GROUP BY UserId, ProfileName HAVING User_Review_Helpfulness>75 ORDER BY User_Review_Count DESC limit 20")
+val df_metric6_p2 = df_metric6_p1.sort(col("User_Review_Helpfulness").desc).show(10, truncate=false)
+//df_metric6_p2.coalesce(1).write.option("header", "true").option("escapeQuotes", "true").csv("E:/Bhavya/assignment/output/metric6")
+//Product rating distribution on webpage- to help user understand the product ratings
+
+val df_metric8 = spark.sql("select ProductId, Year, Score, count(Score) from reviews GROUP BY ProductId, Year, Score ORDER BY ProductId, Year, Score")
+df_metric8.coalesce(1).write.option("header", "true").csv("E:/Bhavya/assignment/output/metric8")
+//m02: helpful reviews percentage?
+spark.sql("select count(*) AS Helpful_reviews from reviews where HelpfulnessNumerator>0").show()
+//6th metric: most influential users
+spark.sql("select UserId, ProfileName, count(UserId) as User_Review_Count, ((sum(ReviewHelpfulnessScore)/count(UserId))*100) as User_Review_Helpfulness from reviews GROUP BY UserId, ProfileName HAVING User_Review_Helpfulness>75 ORDER BY User_Review_Count DESC").show()
